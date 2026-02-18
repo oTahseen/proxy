@@ -15,7 +15,7 @@ BOT_TOKEN = "6469497752:AAH1V_At-4f56MAziV-VuoPqFXlk1IT0TF8"
 XRAY_PATH = "/usr/local/x-ui/bin/xray-linux-amd64"
 
 MAX_CONCURRENT_TESTS = 3
-TEST_TIMEOUT = 15
+TEST_TIMEOUT = 20
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -228,22 +228,46 @@ async def test_proxy(link):
             connector = ProxyConnector.from_url(proxy)
 
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-                start = time.time()
-                async with session.get("https://www.google.com") as r:
-                    await r.text()
-                latency = (time.time() - start) * 1000
 
-                async with session.get("http://ip-api.com/json") as r:
-                    ipinfo = await r.json()
+                start = time.time()
+                async with session.get("https://1.1.1.1", ssl=False) as r:
+                    await r.text()
+                latency_cf = (time.time() - start) * 1000
+
+                start = time.time()
+                async with session.get(
+                    "https://speed.cloudflare.com/__down?bytes=5000000"
+                ) as r:
+                    await r.read()
+                duration = time.time() - start
+                speed_mbps = (5 * 8) / duration
+
+                async with session.get("https://www.cloudflare.com/cdn-cgi/trace") as r:
+                    trace = await r.text()
+
+                ip = "Unknown"
+                country = "Unknown"
+
+                for line in trace.splitlines():
+                    if line.startswith("ip="):
+                        ip = line.split("=")[1]
+                    if line.startswith("loc="):
+                        country = line.split("=")[1]
+
+                score = (1000 / latency_cf) * 0.4 + speed_mbps * 0.6
 
                 return {
-                    "latency": round(latency, 2),
-                    "country": ipinfo.get("country"),
-                    "ip": ipinfo.get("query"),
+                    "latency": round(latency_cf, 2),
+                    "speed": round(speed_mbps, 2),
+                    "country": country,
+                    "ip": ip,
+                    "score": score,
                     "link": link
                 }
+
         except:
             return None
+
         finally:
             proc.terminate()
             if os.path.exists(config_path):
@@ -284,13 +308,14 @@ async def process_links(message, links):
         await status.edit_text("No working proxies.")
         return
 
-    working.sort(key=lambda x: x["latency"])
+    working.sort(key=lambda x: x["score"], reverse=True)
 
-    response = "🏆 Working Proxies:\n\n"
+    response = "🏆 Best Proxies (Cloudflare Tested):\n\n"
+
     for i, r in enumerate(working[:5], 1):
         response += (
             f"{i}. {r['country']} | {r['ip']}\n"
-            f"⚡ {r['latency']} ms\n"
+            f"⚡ {r['latency']} ms | 🚀 {r['speed']} Mbps\n"
             f"<code>{r['link']}</code>\n\n"
         )
 
