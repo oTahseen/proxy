@@ -15,104 +15,159 @@ BOT_TOKEN = "6469497752:AAH1V_At-4f56MAziV-VuoPqFXlk1IT0TF8"
 XRAY_PATH = "/usr/local/x-ui/bin/xray-linux-amd64"
 
 MAX_CONCURRENT_TESTS = 3
-MAX_PROXIES_PER_REQUEST = 200
+MAX_PROXIES_PER_REQUEST = 50
 TEST_TIMEOUT = 15
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_TESTS)
 
-def safe_base64_decode(data: str):
-    try:
-        data = data.encode("ascii", errors="ignore").decode()
-        padding = "=" * (-len(data) % 4)
-        return base64.urlsafe_b64decode(data + padding).decode("utf-8")
-    except:
-        return None
+def b64_decode(data):
+    padding = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(data + padding).decode()
 
-def parse_ss(link: str):
-    try:
-        link = link.split("#")[0].strip()
-        raw = link.replace("ss://", "")
-        if "@" not in raw:
-            decoded = safe_base64_decode(raw)
-            if not decoded:
-                return None
-            method_password, server_port = decoded.split("@")
-        else:
-            method_password, server_port = raw.split("@")
-        method, password = method_password.split(":")
-        server, port = server_port.split(":")
-        return {
-            "protocol": "shadowsocks",
-            "settings": {
-                "servers": [{
-                    "address": server,
-                    "port": int(port),
-                    "method": method,
-                    "password": password
-                }]
-            }
+def build_vless(link):
+    link = link.split("#")[0]
+    parsed = urlparse(link)
+    query = parse_qs(parsed.query)
+
+    stream = {
+        "network": query.get("type", ["tcp"])[0],
+        "security": query.get("security", ["none"])[0]
+    }
+
+    if stream["security"] == "reality":
+        stream["realitySettings"] = {
+            "publicKey": query.get("pbk", [""])[0],
+            "shortId": query.get("sid", [""])[0],
+            "fingerprint": query.get("fp", ["chrome"])[0],
+            "serverName": query.get("sni", [""])[0]
         }
-    except:
-        return None
 
-def parse_trojan(link: str):
-    try:
-        link = link.split("#")[0].strip()
-        parsed = urlparse(link)
-        return {
-            "protocol": "trojan",
-            "settings": {
-                "servers": [{
-                    "address": parsed.hostname,
-                    "port": parsed.port,
-                    "password": parsed.username
-                }]
-            }
+    if stream["network"] == "ws":
+        stream["wsSettings"] = {
+            "path": query.get("path", ["/"])[0],
+            "headers": {"Host": query.get("host", [""])[0]}
         }
-    except:
-        return None
 
-def parse_vless(link: str):
-    try:
-        link = link.split("#")[0].strip()
-        parsed = urlparse(link)
-        query = parse_qs(parsed.query)
-        return {
-            "protocol": "vless",
-            "settings": {
-                "vnext": [{
-                    "address": parsed.hostname,
-                    "port": parsed.port,
-                    "users": [{
-                        "id": parsed.username,
-                        "encryption": "none"
-                    }]
-                }]
-            },
-            "streamSettings": {
-                "network": query.get("type", ["tcp"])[0],
-                "security": query.get("security", ["none"])[0]
-            }
+    if stream["network"] == "grpc":
+        stream["grpcSettings"] = {
+            "serviceName": query.get("serviceName", [""])[0],
+            "multiMode": query.get("mode", ["gun"])[0] == "multi"
         }
-    except:
-        return None
 
-def build_outbound(link: str):
-    if link.startswith("ss://"):
-        return parse_ss(link)
-    if link.startswith("trojan://"):
-        return parse_trojan(link)
+    if stream["security"] == "tls":
+        stream["tlsSettings"] = {
+            "serverName": query.get("sni", [""])[0],
+            "allowInsecure": False
+        }
+
+    outbound = {
+        "protocol": "vless",
+        "settings": {
+            "vnext": [{
+                "address": parsed.hostname,
+                "port": parsed.port,
+                "users": [{
+                    "id": parsed.username,
+                    "encryption": "none",
+                    "flow": query.get("flow", [""])[0]
+                }]
+            }]
+        },
+        "streamSettings": stream
+    }
+
+    return outbound
+
+def build_vmess(link):
+    raw = link.replace("vmess://", "")
+    data = json.loads(b64_decode(raw))
+
+    stream = {
+        "network": data.get("net", "tcp"),
+        "security": "tls" if data.get("tls") == "tls" else "none"
+    }
+
+    if data.get("net") == "ws":
+        stream["wsSettings"] = {
+            "path": data.get("path", "/"),
+            "headers": {"Host": data.get("host", "")}
+        }
+
+    outbound = {
+        "protocol": "vmess",
+        "settings": {
+            "vnext": [{
+                "address": data["add"],
+                "port": int(data["port"]),
+                "users": [{
+                    "id": data["id"],
+                    "alterId": int(data.get("aid", 0)),
+                    "security": data.get("scy", "auto")
+                }]
+            }]
+        },
+        "streamSettings": stream
+    }
+
+    return outbound
+
+def build_trojan(link):
+    link = link.split("#")[0]
+    parsed = urlparse(link)
+
+    return {
+        "protocol": "trojan",
+        "settings": {
+            "servers": [{
+                "address": parsed.hostname,
+                "port": parsed.port,
+                "password": parsed.username
+            }]
+        },
+        "streamSettings": {
+            "security": "tls",
+            "tlsSettings": {"serverName": parsed.hostname}
+        }
+    }
+
+def build_ss(link):
+    link = link.split("#")[0]
+    raw = link.replace("ss://", "")
+    decoded = b64_decode(raw)
+    method_pass, server_port = decoded.split("@")
+    method, password = method_pass.split(":")
+    server, port = server_port.split(":")
+
+    return {
+        "protocol": "shadowsocks",
+        "settings": {
+            "servers": [{
+                "address": server,
+                "port": int(port),
+                "method": method,
+                "password": password
+            }]
+        }
+    }
+
+def build_outbound(link):
     if link.startswith("vless://"):
-        return parse_vless(link)
+        return build_vless(link)
+    if link.startswith("vmess://"):
+        return build_vmess(link)
+    if link.startswith("trojan://"):
+        return build_trojan(link)
+    if link.startswith("ss://"):
+        return build_ss(link)
     return None
 
-def generate_config(outbound, socks_port):
+def generate_config(outbound, port):
     return {
         "log": {"loglevel": "warning"},
         "inbounds": [{
-            "port": socks_port,
+            "port": port,
             "listen": "127.0.0.1",
             "protocol": "socks",
             "settings": {"udp": True}
@@ -120,19 +175,17 @@ def generate_config(outbound, socks_port):
         "outbounds": [outbound]
     }
 
-async def test_proxy(link: str):
+async def test_proxy(link):
     async with semaphore:
         outbound = build_outbound(link)
         if not outbound:
-            return {"error": "invalid"}
+            return None
 
-        test_id = str(uuid.uuid4())
-        socks_port = 20000 + int(uuid.uuid4().int % 10000)
-        config_path = f"/tmp/xray_test_{test_id}.json"
+        port = 20000 + int(uuid.uuid4().int % 10000)
+        config_path = f"/tmp/{uuid.uuid4()}.json"
 
-        config = generate_config(outbound, socks_port)
         with open(config_path, "w") as f:
-            json.dump(config, f)
+            json.dump(generate_config(outbound, port), f)
 
         proc = subprocess.Popen(
             [XRAY_PATH, "-config", config_path],
@@ -141,101 +194,73 @@ async def test_proxy(link: str):
         )
 
         await asyncio.sleep(2)
-        proxy_url = f"socks5://127.0.0.1:{socks_port}"
+
+        proxy = f"socks5://127.0.0.1:{port}"
 
         try:
             timeout = aiohttp.ClientTimeout(total=TEST_TIMEOUT)
-            connector = ProxyConnector.from_url(proxy_url)
+            connector = ProxyConnector.from_url(proxy)
 
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
                 start = time.time()
-                async with session.get("https://www.google.com") as resp:
-                    await resp.text()
+                async with session.get("https://www.google.com") as r:
+                    await r.text()
                 latency = (time.time() - start) * 1000
 
-                start = time.time()
-                async with session.get("https://speed.cloudflare.com/__down?bytes=5000000") as resp:
-                    await resp.read()
-                duration = time.time() - start
-                speed_mbps = (5 * 8) / duration
+                async with session.get("http://ip-api.com/json") as r:
+                    ipinfo = await r.json()
 
-                async with session.get("http://ip-api.com/json") as resp:
-                    ipinfo = await resp.json()
-
-                score = (1000 / latency) * 0.4 + speed_mbps * 0.6
-
-                result = {
+                return {
                     "latency": round(latency, 2),
-                    "speed": round(speed_mbps, 2),
-                    "score": round(score, 2),
                     "ip": ipinfo.get("query"),
                     "country": ipinfo.get("country"),
                     "link": link
                 }
 
         except:
-            result = {"error": "failed"}
-
+            return None
         finally:
             proc.terminate()
-            if os.path.exists(config_path):
-                os.remove(config_path)
+            os.remove(config_path)
 
-        return result
+async def process_links(message, links):
+    links = [l.strip() for l in links if l.strip()]
+    await message.answer(f"Testing {len(links)} proxies...")
 
-async def process_links(message: types.Message, links):
-    cleaned = [l.strip().replace(" ", "") for l in links if l.strip()]
-    if not cleaned:
-        await message.answer("No proxy links found.")
-        return
-    if len(cleaned) > MAX_PROXIES_PER_REQUEST:
-        await message.answer(f"Maximum {MAX_PROXIES_PER_REQUEST} proxies per request.")
-        return
-
-    await message.answer(f"Testing {len(cleaned)} proxies...")
-
-    tasks = [test_proxy(link) for link in cleaned]
+    tasks = [test_proxy(l) for l in links]
     results = await asyncio.gather(*tasks)
 
-    working = [r for r in results if "score" in r]
-    failed = len(results) - len(working)
+    working = [r for r in results if r]
 
     if not working:
-        await message.answer("No working proxies found.")
+        await message.answer("No working proxies.")
         return
 
-    working.sort(key=lambda x: x["score"], reverse=True)
+    working.sort(key=lambda x: x["latency"])
 
-    response = "🏆 Best Proxies:\n\n"
-
+    response = "🏆 Working Proxies:\n\n"
     for i, r in enumerate(working[:5], 1):
         response += (
             f"{i}. {r['country']} | {r['ip']}\n"
-            f"⚡ {r['latency']} ms | {r['speed']} Mbps\n"
+            f"⚡ {r['latency']} ms\n"
             f"<code>{r['link']}</code>\n\n"
         )
-
-    response += f"Working: {len(working)}\nFailed: {failed}"
 
     await message.answer(response, parse_mode="HTML")
 
 @dp.message(CommandStart())
-async def start_handler(message: types.Message):
-    await message.answer("Send proxy links (one per line) or upload a .txt file.")
+async def start(message: types.Message):
+    await message.answer("Send proxy links or upload .txt file.")
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def text_handler(message: types.Message):
-    await process_links(message, message.text.strip().splitlines())
+    await process_links(message, message.text.splitlines())
 
 @dp.message(F.document)
-async def document_handler(message: types.Message):
-    document = message.document
-    if not document.file_name.endswith(".txt"):
-        await message.answer("Upload a .txt file only.")
-        return
-    file = await bot.get_file(document.file_id)
-    downloaded = await bot.download_file(file.file_path)
-    content = downloaded.read().decode("utf-8", errors="ignore")
+async def doc_handler(message: types.Message):
+    file = await bot.get_file(message.document.file_id)
+    data = await bot.download_file(file.file_path)
+    content = data.read().decode()
     await process_links(message, content.splitlines())
 
 async def main():
