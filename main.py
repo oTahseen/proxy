@@ -15,142 +15,169 @@ BOT_TOKEN = "6469497752:AAH1V_At-4f56MAziV-VuoPqFXlk1IT0TF8"
 XRAY_PATH = "/usr/local/x-ui/bin/xray-linux-amd64"
 
 MAX_CONCURRENT_TESTS = 3
-MAX_PROXIES_PER_REQUEST = 50
 TEST_TIMEOUT = 15
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_TESTS)
 
-def b64_decode(data):
-    padding = "=" * (-len(data) % 4)
-    return base64.urlsafe_b64decode(data + padding).decode()
-
-def build_vless(link):
-    link = link.split("#")[0]
-    parsed = urlparse(link)
-    query = parse_qs(parsed.query)
-
-    stream = {
-        "network": query.get("type", ["tcp"])[0],
-        "security": query.get("security", ["none"])[0]
-    }
-
-    if stream["security"] == "reality":
-        stream["realitySettings"] = {
-            "publicKey": query.get("pbk", [""])[0],
-            "shortId": query.get("sid", [""])[0],
-            "fingerprint": query.get("fp", ["chrome"])[0],
-            "serverName": query.get("sni", [""])[0]
-        }
-
-    if stream["network"] == "ws":
-        stream["wsSettings"] = {
-            "path": query.get("path", ["/"])[0],
-            "headers": {"Host": query.get("host", [""])[0]}
-        }
-
-    if stream["network"] == "grpc":
-        stream["grpcSettings"] = {
-            "serviceName": query.get("serviceName", [""])[0],
-            "multiMode": query.get("mode", ["gun"])[0] == "multi"
-        }
-
-    if stream["security"] == "tls":
-        stream["tlsSettings"] = {
-            "serverName": query.get("sni", [""])[0],
-            "allowInsecure": False
-        }
-
-    outbound = {
-        "protocol": "vless",
-        "settings": {
-            "vnext": [{
-                "address": parsed.hostname,
-                "port": parsed.port,
-                "users": [{
-                    "id": parsed.username,
-                    "encryption": "none",
-                    "flow": query.get("flow", [""])[0]
-                }]
-            }]
-        },
-        "streamSettings": stream
-    }
-
-    return outbound
-
-def build_vmess(link):
-    raw = link.replace("vmess://", "")
-    data = json.loads(b64_decode(raw))
-
-    stream = {
-        "network": data.get("net", "tcp"),
-        "security": "tls" if data.get("tls") == "tls" else "none"
-    }
-
-    if data.get("net") == "ws":
-        stream["wsSettings"] = {
-            "path": data.get("path", "/"),
-            "headers": {"Host": data.get("host", "")}
-        }
-
-    outbound = {
-        "protocol": "vmess",
-        "settings": {
-            "vnext": [{
-                "address": data["add"],
-                "port": int(data["port"]),
-                "users": [{
-                    "id": data["id"],
-                    "alterId": int(data.get("aid", 0)),
-                    "security": data.get("scy", "auto")
-                }]
-            }]
-        },
-        "streamSettings": stream
-    }
-
-    return outbound
-
-def build_trojan(link):
-    link = link.split("#")[0]
-    parsed = urlparse(link)
-
-    return {
-        "protocol": "trojan",
-        "settings": {
-            "servers": [{
-                "address": parsed.hostname,
-                "port": parsed.port,
-                "password": parsed.username
-            }]
-        },
-        "streamSettings": {
-            "security": "tls",
-            "tlsSettings": {"serverName": parsed.hostname}
-        }
-    }
+def safe_b64(data):
+    try:
+        data = data.strip()
+        padding = "=" * (-len(data) % 4)
+        return base64.urlsafe_b64decode(data + padding).decode()
+    except:
+        return None
 
 def build_ss(link):
-    link = link.split("#")[0]
-    raw = link.replace("ss://", "")
-    decoded = b64_decode(raw)
-    method_pass, server_port = decoded.split("@")
-    method, password = method_pass.split(":")
-    server, port = server_port.split(":")
+    try:
+        link = link.split("#")[0]
+        raw = link.replace("ss://", "")
 
-    return {
-        "protocol": "shadowsocks",
-        "settings": {
-            "servers": [{
-                "address": server,
-                "port": int(port),
-                "method": method,
-                "password": password
-            }]
+        if "@" in raw:
+            part1, part2 = raw.split("@", 1)
+            decoded = safe_b64(part1)
+
+            if decoded:
+                method, password = decoded.split(":")
+            else:
+                method, password = part1.split(":")
+
+            server, port = part2.split(":")
+        else:
+            decoded = safe_b64(raw)
+            if not decoded:
+                return None
+            method_password, server_port = decoded.split("@")
+            method, password = method_password.split(":")
+            server, port = server_port.split(":")
+
+        return {
+            "protocol": "shadowsocks",
+            "settings": {
+                "servers": [{
+                    "address": server,
+                    "port": int(port),
+                    "method": method,
+                    "password": password
+                }]
+            }
         }
-    }
+    except:
+        return None
+
+def build_trojan(link):
+    try:
+        link = link.split("#")[0]
+        parsed = urlparse(link)
+        return {
+            "protocol": "trojan",
+            "settings": {
+                "servers": [{
+                    "address": parsed.hostname,
+                    "port": parsed.port,
+                    "password": parsed.username
+                }]
+            },
+            "streamSettings": {
+                "security": "tls",
+                "tlsSettings": {"serverName": parsed.hostname}
+            }
+        }
+    except:
+        return None
+
+def build_vless(link):
+    try:
+        link = link.split("#")[0]
+        parsed = urlparse(link)
+        query = parse_qs(parsed.query)
+
+        stream = {
+            "network": query.get("type", ["tcp"])[0],
+            "security": query.get("security", ["none"])[0]
+        }
+
+        if stream["security"] == "reality":
+            stream["realitySettings"] = {
+                "publicKey": query.get("pbk", [""])[0],
+                "shortId": query.get("sid", [""])[0],
+                "fingerprint": query.get("fp", ["chrome"])[0],
+                "serverName": query.get("sni", [""])[0]
+            }
+
+        if stream["network"] == "ws":
+            stream["wsSettings"] = {
+                "path": query.get("path", ["/"])[0],
+                "headers": {"Host": query.get("host", [""])[0]}
+            }
+
+        if stream["network"] == "grpc":
+            stream["grpcSettings"] = {
+                "serviceName": query.get("serviceName", [""])[0],
+                "multiMode": False
+            }
+
+        if stream["security"] == "tls":
+            stream["tlsSettings"] = {
+                "serverName": query.get("sni", [""])[0],
+                "allowInsecure": False
+            }
+
+        return {
+            "protocol": "vless",
+            "settings": {
+                "vnext": [{
+                    "address": parsed.hostname,
+                    "port": parsed.port,
+                    "users": [{
+                        "id": parsed.username,
+                        "encryption": "none",
+                        "flow": query.get("flow", [""])[0]
+                    }]
+                }]
+            },
+            "streamSettings": stream
+        }
+    except:
+        return None
+
+def build_vmess(link):
+    try:
+        raw = link.replace("vmess://", "")
+        decoded = safe_b64(raw)
+        if not decoded:
+            return None
+        data = json.loads(decoded)
+
+        stream = {
+            "network": data.get("net", "tcp"),
+            "security": "tls" if data.get("tls") == "tls" else "none"
+        }
+
+        if data.get("net") == "ws":
+            stream["wsSettings"] = {
+                "path": data.get("path", "/"),
+                "headers": {"Host": data.get("host", "")}
+            }
+
+        return {
+            "protocol": "vmess",
+            "settings": {
+                "vnext": [{
+                    "address": data["add"],
+                    "port": int(data["port"]),
+                    "users": [{
+                        "id": data["id"],
+                        "alterId": int(data.get("aid", 0)),
+                        "security": data.get("scy", "auto")
+                    }]
+                }]
+            },
+            "streamSettings": stream
+        }
+    except:
+        return None
 
 def build_outbound(link):
     if link.startswith("vless://"):
@@ -194,7 +221,6 @@ async def test_proxy(link):
         )
 
         await asyncio.sleep(2)
-
         proxy = f"socks5://127.0.0.1:{port}"
 
         try:
@@ -212,28 +238,50 @@ async def test_proxy(link):
 
                 return {
                     "latency": round(latency, 2),
-                    "ip": ipinfo.get("query"),
                     "country": ipinfo.get("country"),
+                    "ip": ipinfo.get("query"),
                     "link": link
                 }
-
         except:
             return None
         finally:
             proc.terminate()
-            os.remove(config_path)
+            if os.path.exists(config_path):
+                os.remove(config_path)
 
 async def process_links(message, links):
     links = [l.strip() for l in links if l.strip()]
-    await message.answer(f"Testing {len(links)} proxies...")
+    total = len(links)
+    working = []
+    failed = 0
+    processed = 0
 
-    tasks = [test_proxy(l) for l in links]
-    results = await asyncio.gather(*tasks)
+    status = await message.answer(
+        f"Testing {total} proxies...\n\nWorking: 0\nFailed: 0\nRemaining: {total}"
+    )
 
-    working = [r for r in results if r]
+    async def run_test(link):
+        nonlocal processed, failed, working
+        result = await test_proxy(link)
+        processed += 1
+
+        if result:
+            working.append(result)
+        else:
+            failed += 1
+
+        if processed % 3 == 0 or processed == total:
+            await status.edit_text(
+                f"Testing {total} proxies...\n\n"
+                f"Working: {len(working)}\n"
+                f"Failed: {failed}\n"
+                f"Remaining: {total - processed}"
+            )
+
+    await asyncio.gather(*(run_test(l) for l in links))
 
     if not working:
-        await message.answer("No working proxies.")
+        await status.edit_text("No working proxies.")
         return
 
     working.sort(key=lambda x: x["latency"])
@@ -260,7 +308,7 @@ async def text_handler(message: types.Message):
 async def doc_handler(message: types.Message):
     file = await bot.get_file(message.document.file_id)
     data = await bot.download_file(file.file_path)
-    content = data.read().decode()
+    content = data.read().decode(errors="ignore")
     await process_links(message, content.splitlines())
 
 async def main():
