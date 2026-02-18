@@ -25,74 +25,111 @@ TEST_TIMEOUT = 15
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_TESTS)
 
 # ==========================================
-# PROXY PARSERS
+# SAFE PROXY PARSERS
 # ==========================================
 
-def parse_ss(link):
-    raw = link.replace("ss://", "")
-    decoded = base64.urlsafe_b64decode(raw + "===").decode()
-    method_password, server_port = decoded.split("@")
-    method, password = method_password.split(":")
-    server, port = server_port.split(":")
-    return {
-        "protocol": "shadowsocks",
-        "settings": {
-            "servers": [{
-                "address": server,
-                "port": int(port),
-                "method": method,
-                "password": password
-            }]
-        }
-    }
+def safe_base64_decode(data: str):
+    try:
+        data = data.encode("ascii", errors="ignore").decode()
+        padding = "=" * (-len(data) % 4)
+        return base64.urlsafe_b64decode(data + padding).decode("utf-8")
+    except Exception:
+        return None
 
-def parse_trojan(link):
-    parsed = urlparse(link)
-    return {
-        "protocol": "trojan",
-        "settings": {
-            "servers": [{
-                "address": parsed.hostname,
-                "port": parsed.port,
-                "password": parsed.username
-            }]
-        }
-    }
 
-def parse_vless(link):
-    parsed = urlparse(link)
-    query = parse_qs(parsed.query)
+def parse_ss(link: str):
+    try:
+        link = link.split("#")[0].strip()
+        raw = link.replace("ss://", "")
 
-    return {
-        "protocol": "vless",
-        "settings": {
-            "vnext": [{
-                "address": parsed.hostname,
-                "port": parsed.port,
-                "users": [{
-                    "id": parsed.username,
-                    "encryption": "none"
+        # Case 1: Entire thing base64 encoded
+        if "@" not in raw:
+            decoded = safe_base64_decode(raw)
+            if not decoded:
+                return None
+            method_password, server_port = decoded.split("@")
+        else:
+            method_password, server_port = raw.split("@")
+
+        method, password = method_password.split(":")
+        server, port = server_port.split(":")
+
+        return {
+            "protocol": "shadowsocks",
+            "settings": {
+                "servers": [{
+                    "address": server,
+                    "port": int(port),
+                    "method": method,
+                    "password": password
                 }]
-            }]
-        },
-        "streamSettings": {
-            "network": query.get("type", ["tcp"])[0],
-            "security": query.get("security", ["none"])[0]
+            }
         }
-    }
+    except Exception:
+        return None
 
-def build_outbound(link):
-    if link.startswith("ss://"):
-        return parse_ss(link)
-    elif link.startswith("trojan://"):
-        return parse_trojan(link)
-    elif link.startswith("vless://"):
-        return parse_vless(link)
+
+def parse_trojan(link: str):
+    try:
+        link = link.split("#")[0].strip()
+        parsed = urlparse(link)
+
+        return {
+            "protocol": "trojan",
+            "settings": {
+                "servers": [{
+                    "address": parsed.hostname,
+                    "port": parsed.port,
+                    "password": parsed.username
+                }]
+            }
+        }
+    except Exception:
+        return None
+
+
+def parse_vless(link: str):
+    try:
+        link = link.split("#")[0].strip()
+        parsed = urlparse(link)
+        query = parse_qs(parsed.query)
+
+        return {
+            "protocol": "vless",
+            "settings": {
+                "vnext": [{
+                    "address": parsed.hostname,
+                    "port": parsed.port,
+                    "users": [{
+                        "id": parsed.username,
+                        "encryption": "none"
+                    }]
+                }]
+            },
+            "streamSettings": {
+                "network": query.get("type", ["tcp"])[0],
+                "security": query.get("security", ["none"])[0]
+            }
+        }
+    except Exception:
+        return None
+
+
+def build_outbound(link: str):
+    try:
+        if link.startswith("ss://"):
+            return parse_ss(link)
+        elif link.startswith("trojan://"):
+            return parse_trojan(link)
+        elif link.startswith("vless://"):
+            return parse_vless(link)
+    except Exception:
+        return None
     return None
+
 
 # ==========================================
 # XRAY CONFIG
@@ -110,17 +147,18 @@ def generate_config(outbound, socks_port):
         "outbounds": [outbound]
     }
 
+
 # ==========================================
 # TEST PROXY
 # ==========================================
 
-async def test_proxy(link):
+async def test_proxy(link: str):
 
     async with semaphore:
 
         outbound = build_outbound(link)
         if not outbound:
-            return {"link": link, "error": "Unsupported protocol"}
+            return {"link": link, "error": "Invalid or unsupported"}
 
         test_id = str(uuid.uuid4())
         socks_port = 20000 + int(uuid.uuid4().int % 10000)
@@ -150,7 +188,7 @@ async def test_proxy(link):
                 timeout=timeout
             ) as session:
 
-                # Latency test
+                # Latency
                 start = time.time()
                 async with session.get("https://www.google.com") as resp:
                     await resp.text()
@@ -175,8 +213,8 @@ async def test_proxy(link):
                     "score": round(score, 2)
                 }
 
-        except Exception as e:
-            result = {"link": link, "error": str(e)}
+        except Exception:
+            result = {"link": link, "error": "Connection failed"}
 
         finally:
             proc.terminate()
@@ -185,27 +223,34 @@ async def test_proxy(link):
 
         return result
 
+
 # ==========================================
 # PROCESS LINKS
 # ==========================================
 
 async def process_links(message: types.Message, links):
 
-    links = [l.strip() for l in links if l.strip()]
+    cleaned = []
+    for l in links:
+        l = l.strip()
+        if not l:
+            continue
+        l = l.replace(" ", "")
+        cleaned.append(l)
 
-    if not links:
+    if not cleaned:
         await message.answer("⚠️ No proxy links found.")
         return
 
-    if len(links) > MAX_PROXIES_PER_REQUEST:
+    if len(cleaned) > MAX_PROXIES_PER_REQUEST:
         await message.answer(
             f"⚠️ Maximum {MAX_PROXIES_PER_REQUEST} proxies per request."
         )
         return
 
-    await message.answer(f"🔍 Testing {len(links)} proxies...")
+    await message.answer(f"🔍 Testing {len(cleaned)} proxies...")
 
-    tasks = [test_proxy(link) for link in links]
+    tasks = [test_proxy(link) for link in cleaned]
     results = await asyncio.gather(*tasks)
 
     working = [r for r in results if "score" in r]
@@ -229,6 +274,7 @@ async def process_links(message: types.Message, links):
     response += f"\n❌ Failed: {len(failed)}"
 
     await message.answer(response, parse_mode="Markdown")
+
 
 # ==========================================
 # HANDLERS (AIOGRAM V3)
@@ -260,8 +306,8 @@ async def document_handler(message: types.Message):
     content = downloaded.read().decode("utf-8", errors="ignore")
 
     links = content.strip().splitlines()
-
     await process_links(message, links)
+
 
 # ==========================================
 # START BOT
