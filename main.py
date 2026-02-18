@@ -7,12 +7,14 @@ import base64
 import json
 import subprocess
 from urllib.parse import urlparse, parse_qs
-from aiogram import Bot, Dispatcher, types
+
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import CommandStart
 from aiohttp_socks import ProxyConnector
 
-# =====================================
+# ==========================================
 # CONFIG
-# =====================================
+# ==========================================
 
 BOT_TOKEN = "6469497752:AAH1V_At-4f56MAziV-VuoPqFXlk1IT0TF8"
 XRAY_PATH = "/usr/local/x-ui/bin/xray-linux-amd64"
@@ -26,9 +28,9 @@ dp = Dispatcher()
 
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_TESTS)
 
-# =====================================
+# ==========================================
 # PROXY PARSERS
-# =====================================
+# ==========================================
 
 def parse_ss(link):
     raw = link.replace("ss://", "")
@@ -64,6 +66,7 @@ def parse_trojan(link):
 def parse_vless(link):
     parsed = urlparse(link)
     query = parse_qs(parsed.query)
+
     return {
         "protocol": "vless",
         "settings": {
@@ -89,12 +92,11 @@ def build_outbound(link):
         return parse_trojan(link)
     elif link.startswith("vless://"):
         return parse_vless(link)
-    else:
-        return None
+    return None
 
-# =====================================
+# ==========================================
 # XRAY CONFIG
-# =====================================
+# ==========================================
 
 def generate_config(outbound, socks_port):
     return {
@@ -108,9 +110,9 @@ def generate_config(outbound, socks_port):
         "outbounds": [outbound]
     }
 
-# =====================================
-# PROXY TESTING
-# =====================================
+# ==========================================
+# TEST PROXY
+# ==========================================
 
 async def test_proxy(link):
 
@@ -148,7 +150,7 @@ async def test_proxy(link):
                 timeout=timeout
             ) as session:
 
-                # Latency
+                # Latency test
                 start = time.time()
                 async with session.get("https://www.google.com") as resp:
                     await resp.text()
@@ -161,6 +163,7 @@ async def test_proxy(link):
                 ) as resp:
                     await resp.read()
                 duration = time.time() - start
+
                 speed_mbps = (5 * 8) / duration
 
                 score = (1000 / latency) * 0.4 + speed_mbps * 0.6
@@ -182,25 +185,25 @@ async def test_proxy(link):
 
         return result
 
-# =====================================
+# ==========================================
 # PROCESS LINKS
-# =====================================
+# ==========================================
 
-async def process_links(message, links):
+async def process_links(message: types.Message, links):
 
     links = [l.strip() for l in links if l.strip()]
 
     if not links:
-        await message.reply("⚠️ No proxy links found.")
+        await message.answer("⚠️ No proxy links found.")
         return
 
     if len(links) > MAX_PROXIES_PER_REQUEST:
-        await message.reply(
+        await message.answer(
             f"⚠️ Maximum {MAX_PROXIES_PER_REQUEST} proxies per request."
         )
         return
 
-    await message.reply(f"🔍 Testing {len(links)} proxies...")
+    await message.answer(f"🔍 Testing {len(links)} proxies...")
 
     tasks = [test_proxy(link) for link in links]
     results = await asyncio.gather(*tasks)
@@ -209,7 +212,7 @@ async def process_links(message, links):
     failed = [r for r in results if "error" in r]
 
     if not working:
-        await message.reply("❌ No working proxies found.")
+        await message.answer("❌ No working proxies found.")
         return
 
     working.sort(key=lambda x: x["score"], reverse=True)
@@ -222,34 +225,34 @@ async def process_links(message, links):
             f"{r['speed']} Mbps\n"
         )
 
-    response += f"\n✅ Working: {len(working)}"
+    response += f"\n\n✅ Working: {len(working)}"
     response += f"\n❌ Failed: {len(failed)}"
 
-    await message.reply(response, parse_mode="Markdown")
+    await message.answer(response, parse_mode="Markdown")
 
-# =====================================
-# HANDLERS
-# =====================================
+# ==========================================
+# HANDLERS (AIOGRAM V3)
+# ==========================================
 
-@dp.message(commands=["start"])
-async def start_command(message: types.Message):
-    await message.reply(
+@dp.message(CommandStart())
+async def start_handler(message: types.Message):
+    await message.answer(
         "👋 Send proxy links (one per line)\n"
         "or upload a .txt file containing proxy configs."
     )
 
-@dp.message(lambda m: m.text and not m.text.startswith("/"))
-async def handle_text(message: types.Message):
+@dp.message(F.text & ~F.text.startswith("/"))
+async def text_handler(message: types.Message):
     links = message.text.strip().splitlines()
     await process_links(message, links)
 
-@dp.message(lambda m: m.document is not None)
-async def handle_document(message: types.Message):
+@dp.message(F.document)
+async def document_handler(message: types.Message):
 
     document = message.document
 
     if not document.file_name.endswith(".txt"):
-        await message.reply("⚠️ Please upload a .txt file only.")
+        await message.answer("⚠️ Please upload a .txt file only.")
         return
 
     file = await bot.get_file(document.file_id)
@@ -260,9 +263,9 @@ async def handle_document(message: types.Message):
 
     await process_links(message, links)
 
-# =====================================
+# ==========================================
 # START BOT
-# =====================================
+# ==========================================
 
 async def main():
     await dp.start_polling(bot)
